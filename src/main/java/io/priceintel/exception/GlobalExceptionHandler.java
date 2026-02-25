@@ -23,4 +23,16 @@ public class GlobalExceptionHandler {
                 .build();
 
     }
+
+    @ExceptionHandler(PriceSnapshotNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiErrorResponse handlePriceSnapshotNotFound(PriceSnapshotNotFoundException ex, HttpServletRequest request) {
+        return ApiErrorResponse.builder()
+                .timestamp(Instant.now())
+                .status(HttpStatus.NOT_FOUND.value())
+                .error(HttpStatus.NOT_FOUND.getReasonPhrase())
+                .message(ex.getMessage())
+                .path(request.getRequestURI())
+                .build();
+    }
 }
