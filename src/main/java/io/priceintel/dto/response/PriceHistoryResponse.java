@@ -1,5 +1,6 @@
 package io.priceintel.dto.response;
 
+import io.priceintel.dto.PricePoint;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;

@@ -1,23 +1,24 @@
-package io.priceintel.dto.response;
+package io.priceintel.dto;
 
 import io.priceintel.enums.Availability;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
-
+import lombok.Setter;
 import java.math.BigDecimal;
 import java.time.Instant;
 
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class PricePoint {
+public class SkuComparisonItem {
 
-    private BigDecimal sellingPrice;
-    private BigDecimal discount;
+    private Long skuId;
+    private BigDecimal price;
     private Availability availability;
     private Instant capturedAt;
+    private Integer rank;
 }
-

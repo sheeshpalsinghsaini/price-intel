@@ -1,7 +1,7 @@
 package io.priceintel.service;
 
 import io.priceintel.dto.response.LatestPriceResponse;
-import io.priceintel.dto.response.PricePoint;
+import io.priceintel.dto.PricePoint;
 import io.priceintel.entity.PriceSnapshot;
 import org.springframework.stereotype.Component;
 
