@@ -10,8 +10,7 @@ import java.math.BigDecimal;
 import java.util.List;
 
 @Getter
-@Setter
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class SkuComparisonResponse {
@@ -23,4 +22,11 @@ public class SkuComparisonResponse {
     private BigDecimal priceSpread;
     private BigDecimal percentageDifference;
     private List<SkuComparisonItem> results;
+
+    // Pagination fields
+    private Integer page;
+    private Integer size;
+    private Integer totalPages;
+    private Integer totalItems;
 }
+

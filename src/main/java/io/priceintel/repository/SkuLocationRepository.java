@@ -23,4 +23,8 @@ public interface SkuLocationRepository extends JpaRepository<SkuLocation, Long> 
     List<SkuLocation> findByCityIgnoreCase(String city);
 
     List<SkuLocation> findByProductId(Long productId);
+
+    List<SkuLocation> findByProductIdAndIsActiveTrue(Long productId);
+
+    List<SkuLocation> findByProductIdAndCityIgnoreCaseAndIsActiveTrue(Long productId, String city);
 }

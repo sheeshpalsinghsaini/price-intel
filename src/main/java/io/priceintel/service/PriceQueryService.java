@@ -7,11 +7,15 @@ import io.priceintel.dto.PricePoint;
 import io.priceintel.dto.response.PriceStatsResponse;
 import io.priceintel.dto.response.SkuComparisonResponse;
 import io.priceintel.entity.PriceSnapshot;
+import io.priceintel.entity.SkuLocation;
 import io.priceintel.enums.Availability;
+import io.priceintel.enums.ComparisonSortType;
 import io.priceintel.exception.PriceSnapshotNotFoundException;
+import io.priceintel.repository.SkuLocationRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -30,7 +34,10 @@ public class PriceQueryService {
     private final PriceSnapshotService priceSnapshotService;
     private final PriceSnapshotMapper priceSnapshotMapper;
     private final PriceQueryValidator validator;
+    private final SkuLocationRepository skuLocationRepository;
+    private final ComparisonValidator comparisonValidator;
 
+    @Transactional(readOnly = true)
     public LatestPriceResponse getLatestPrice(Long skuId) {
         log.info("Fetching latest price for skuId={}", skuId);
 
@@ -50,6 +57,7 @@ public class PriceQueryService {
         return response;
     }
 
+    @Transactional(readOnly = true)
     public PriceHistoryResponse getHistory(Long skuId, Instant start, Instant end, Integer limit) {
         log.info("Fetching price history for skuId={}, start={}, end={}, limit={}", skuId, start, end, limit);
 
@@ -117,6 +125,7 @@ public class PriceQueryService {
         return pricePoints.subList(pricePoints.size() - limit, pricePoints.size());
     }
 
+    @Transactional(readOnly = true)
     public PriceStatsResponse getStats(Long skuId, Instant start, Instant end) {
         log.info("Fetching price statistics for skuId={}, start={}, end={}", skuId, start, end);
 
@@ -205,51 +214,82 @@ public class PriceQueryService {
         return response;
     }
 
-    public SkuComparisonResponse compareSkus(List<Long> skuIds, Boolean inStockOnly, String sortBy) {
-        log.info("Comparing {} SKUs with filters: inStockOnly={}, sortBy={}",
-                skuIds != null ? skuIds.size() : 0, inStockOnly, sortBy);
+    @Transactional(readOnly = true)
+    public SkuComparisonResponse compareSkus(List<Long> skuIds, Boolean inStockOnly, ComparisonSortType sortType) {
+        long startTime = System.currentTimeMillis();
+        log.info("Comparing {} SKUs with filters: inStockOnly={}, sortType={}",
+                skuIds != null ? skuIds.size() : 0, inStockOnly, sortType);
 
-        // 1. Validate input
-        validateComparisonInput(skuIds);
+        // 1. Validate input using ComparisonValidator
+        comparisonValidator.validateSkuIds(skuIds);
 
         // 2. Collect valid comparison items
         assert skuIds != null;
         List<SkuComparisonItem> validItems = collectValidComparisonItems(skuIds);
 
-        // 3. Apply in-stock filtering if requested
-        if (Boolean.TRUE.equals(inStockOnly)) {
-            validItems = filterInStockItems(validItems);
+        // 3. Build and return comparison response
+        SkuComparisonResponse response = buildComparisonResponse(validItems, inStockOnly, sortType, null, null);
+
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("SKU comparison completed in {} ms", duration);
+
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public SkuComparisonResponse compareProduct(Long productId, String city, Boolean inStockOnly, ComparisonSortType sortType, Integer page, Integer size) {
+        long startTime = System.currentTimeMillis();
+        log.info("Comparing product prices for productId={}, city={}, inStockOnly={}, sortType={}, page={}, size={}",
+                productId, city, inStockOnly, sortType, page, size);
+
+        // 1. Validate inputs
+        comparisonValidator.validateProductId(productId);
+        comparisonValidator.validatePagination(page, size);
+        comparisonValidator.validateSortType(sortType);
+
+        // 2. Fetch SKU locations
+        List<SkuLocation> skuLocations;
+        if (city != null && !city.trim().isEmpty()) {
+            log.debug("Fetching active SKU locations for productId={} in city={}", productId, city);
+            skuLocations = skuLocationRepository.findByProductIdAndCityIgnoreCaseAndIsActiveTrue(productId, city.trim());
+        } else {
+            log.debug("Fetching all active SKU locations for productId={}", productId);
+            skuLocations = skuLocationRepository.findByProductIdAndIsActiveTrue(productId);
         }
 
-        // 4. Ensure at least 2 valid items remain (already validated in collect/filter)
+        // 3. Check if SKUs found
+        if (skuLocations.isEmpty()) {
+            String errorMsg = city != null
+                    ? String.format("No active SKU locations found for productId=%d in city=%s", productId, city)
+                    : String.format("No active SKU locations found for productId=%d", productId);
+            log.warn(errorMsg);
+            throw new IllegalArgumentException(errorMsg);
+        }
 
-        // 5. Assign rankings based on price (cheapest = rank 1) BEFORE sorting
-        assignRankings(validItems);
+        log.debug("Found {} active SKU locations for product comparison", skuLocations.size());
 
-        // 6. Calculate comparison metrics AFTER filtering
-        ComparisonMetrics metrics = calculateComparisonMetrics(validItems);
+        // 4. Extract SKU IDs and remove duplicates
+        List<Long> skuIds = skuLocations.stream()
+                .map(SkuLocation::getId)
+                .distinct()
+                .toList();
 
-        // 7. Find best value (cheapest in stock)
-        Long bestValueSkuId = findBestValueSkuId(validItems);
+        // 5. Validate SKU batch size using centralized validator
+        comparisonValidator.validateSkuIds(skuIds);
 
-        // 8. Apply sorting (does NOT affect ranking values)
-        applySorting(validItems, sortBy);
+        // 6. Batch fetch latest snapshots (eliminates N+1 query)
+        log.debug("Batch fetching latest snapshots for {} SKUs", skuIds.size());
+        List<PriceSnapshot> snapshots = priceSnapshotService.getLatestSnapshotsForSkuIds(skuIds);
+        log.debug("Fetched {} snapshots out of {} SKUs", snapshots.size(), skuIds.size());
 
-        // 9. Build response
-        SkuComparisonResponse response = SkuComparisonResponse.builder()
-                .totalCompared(validItems.size())
-                .cheapestSkuId(metrics.cheapestSkuId)
-                .mostExpensiveSkuId(metrics.mostExpensiveSkuId)
-                .bestValueSkuId(bestValueSkuId)
-                .priceSpread(metrics.priceSpread)
-                .percentageDifference(metrics.percentageDifference)
-                .results(validItems)
-                .build();
+        // 7. Convert snapshots to comparison items
+        List<SkuComparisonItem> validItems = convertSnapshotsToComparisonItems(snapshots);
 
-        log.info("Successfully compared {} SKUs - cheapest: {} ({}), mostExpensive: {} ({}), bestValue: {}, spread: {}, diff: {}%",
-                validItems.size(), metrics.cheapestSkuId, metrics.minPrice,
-                metrics.mostExpensiveSkuId, metrics.maxPrice, bestValueSkuId,
-                metrics.priceSpread, metrics.percentageDifference);
+        // 8. Build and return comparison response with pagination
+        SkuComparisonResponse response = buildComparisonResponse(validItems, inStockOnly, sortType, page, size);
+
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("Product comparison completed in {} ms", duration);
 
         return response;
     }
@@ -271,17 +311,127 @@ public class PriceQueryService {
         return inStockItems;
     }
 
-    private void assignRankings(List<SkuComparisonItem> items) {
-        // Sort by price ascending for ranking
-        List<SkuComparisonItem> sortedForRanking = new ArrayList<>(items);
-        sortedForRanking.sort(Comparator.comparing(SkuComparisonItem::getPrice));
+    private SkuComparisonResponse buildComparisonResponse(
+            List<SkuComparisonItem> validItems,
+            Boolean inStockOnly,
+            ComparisonSortType sortType,
+            Integer page,
+            Integer size
+    ) {
+        // 1. Apply in-stock filtering if requested
+        if (Boolean.TRUE.equals(inStockOnly)) {
+            validItems = filterInStockItems(validItems);
+        }
 
-        // Assign ranks
+        int totalItems = validItems.size();
+
+        // 2. Assign rankings based on price (cheapest = rank 1) BEFORE sorting
+        validItems = assignRankings(validItems);
+
+        // 3. Calculate comparison metrics AFTER filtering
+        ComparisonMetrics metrics = calculateComparisonMetrics(validItems);
+
+        // 4. Find best value (cheapest in stock)
+        Long bestValueSkuId = findBestValueSkuId(validItems);
+
+        // 5. Default sortType if null
+        sortType = (sortType != null) ? sortType : ComparisonSortType.PRICE_ASC;
+
+        // 6. Apply sorting (does NOT affect ranking values)
+        validItems = applySorting(validItems, sortType);
+
+        // 7. Apply pagination if requested (safe defaults)
+        List<SkuComparisonItem> paginatedItems;
+        Integer effectivePage = null;
+        Integer effectiveSize = null;
+        Integer totalPages = null;
+
+        if (page != null) {
+            // Pagination requested
+            effectivePage = page;
+            effectiveSize = (size != null) ? Math.min(size, 100) : 20; // Default 20, max 100
+            totalPages = (totalItems + effectiveSize - 1) / effectiveSize;
+            paginatedItems = applyPagination(validItems, effectivePage, effectiveSize);
+        } else {
+            // No pagination - return all items
+            paginatedItems = validItems;
+        }
+
+        // 8. Build response
+        SkuComparisonResponse response = SkuComparisonResponse.builder()
+                .totalCompared(paginatedItems.size())
+                .cheapestSkuId(metrics.cheapestSkuId)
+                .mostExpensiveSkuId(metrics.mostExpensiveSkuId)
+                .bestValueSkuId(bestValueSkuId)
+                .priceSpread(metrics.priceSpread)
+                .percentageDifference(metrics.percentageDifference)
+                .results(paginatedItems)
+                .page(effectivePage)
+                .size(effectiveSize)
+                .totalPages(totalPages)
+                .totalItems(page != null ? totalItems : null)
+                .build();
+
+        log.info("Comparison completed: totalItems={}, returnedItems={}, page={}, size={}, cheapest={} ({}), mostExpensive={} ({}), bestValue={}, spread={}, diff={}%",
+                totalItems, paginatedItems.size(), effectivePage, effectiveSize,
+                metrics.cheapestSkuId, metrics.minPrice, metrics.mostExpensiveSkuId, metrics.maxPrice,
+                bestValueSkuId, metrics.priceSpread, metrics.percentageDifference);
+
+        return response;
+    }
+
+    private List<SkuComparisonItem> convertSnapshotsToComparisonItems(List<PriceSnapshot> snapshots) {
+        List<SkuComparisonItem> items = new ArrayList<>();
+
+        for (PriceSnapshot snapshot : snapshots) {
+            BigDecimal sellingPrice = snapshot.getSellingPrice();
+
+            // Skip if selling price is null
+            if (sellingPrice == null) {
+                log.debug("Null selling price for skuId={}, skipping", snapshot.getSkuLocation().getId());
+                continue;
+            }
+
+            // Build comparison item
+            SkuComparisonItem item = SkuComparisonItem.builder()
+                    .skuId(snapshot.getSkuLocation().getId())
+                    .price(sellingPrice)
+                    .availability(snapshot.getAvailability())
+                    .capturedAt(snapshot.getCapturedAt())
+                    .build();
+
+            items.add(item);
+        }
+
+        // Validate minimum count
+        if (items.size() < 2) {
+            log.warn("Insufficient valid SKU snapshots for comparison. Required: 2, Found: {}", items.size());
+            throw new IllegalArgumentException(
+                    String.format("At least 2 valid SKU snapshots required for comparison. Found: %d", items.size())
+            );
+        }
+
+        return items;
+    }
+
+    private List<SkuComparisonItem> assignRankings(List<SkuComparisonItem> items) {
+        // Sort by price ascending for ranking, with tie-breaker on capturedAt (latest first)
+        List<SkuComparisonItem> sortedForRanking = new ArrayList<>(items);
+        sortedForRanking.sort(Comparator.comparing(SkuComparisonItem::getPrice)
+                .thenComparing(SkuComparisonItem::getCapturedAt, Comparator.reverseOrder()));
+
+        // Assign ranks using toBuilder since DTOs are immutable
+        List<SkuComparisonItem> rankedItems = new ArrayList<>();
         for (int i = 0; i < sortedForRanking.size(); i++) {
-            sortedForRanking.get(i).setRank(i + 1);
+            SkuComparisonItem item = sortedForRanking.get(i);
+            SkuComparisonItem rankedItem = item.toBuilder()
+                    .rank(i + 1)
+                    .build();
+            rankedItems.add(rankedItem);
         }
 
         log.debug("Assigned rankings to {} items (rank 1 = cheapest)", items.size());
+        return rankedItems;
     }
 
     private Long findBestValueSkuId(List<SkuComparisonItem> items) {
@@ -299,94 +449,72 @@ public class PriceQueryService {
         return null;
     }
 
-    private void applySorting(List<SkuComparisonItem> items, String sortBy) {
-        Comparator<SkuComparisonItem> comparator = getComparator(sortBy);
-        items.sort(comparator);
+    private List<SkuComparisonItem> applySorting(List<SkuComparisonItem> items, ComparisonSortType sortType) {
+        Comparator<SkuComparisonItem> comparator = getComparator(sortType);
+        List<SkuComparisonItem> sortedItems = new ArrayList<>(items);
+        sortedItems.sort(comparator);
 
-        String effectiveSortBy = sortBy != null ? sortBy.toLowerCase() : "price";
-        log.debug("Sorted {} items by {}", items.size(), effectiveSortBy);
+        log.debug("Sorted {} items by {}", items.size(), sortType);
+        return sortedItems;
     }
 
-    private Comparator<SkuComparisonItem> getComparator(String sortBy) {
-        if (sortBy == null) {
-            return Comparator.comparing(SkuComparisonItem::getPrice);
-        }
-
-        return switch (sortBy.toLowerCase()) {
-            case "price" -> Comparator.comparing(SkuComparisonItem::getPrice);
-            case "price_desc" -> Comparator.comparing(SkuComparisonItem::getPrice).reversed();
-            case "latest" -> Comparator.comparing(SkuComparisonItem::getCapturedAt).reversed();
-            default -> {
-                log.debug("Unknown sortBy '{}', defaulting to price ascending", sortBy);
-                yield Comparator.comparing(SkuComparisonItem::getPrice);
-            }
+    private Comparator<SkuComparisonItem> getComparator(ComparisonSortType sortType) {
+        return switch (sortType) {
+            case PRICE_ASC -> Comparator.comparing(SkuComparisonItem::getPrice);
+            case PRICE_DESC -> Comparator.comparing(SkuComparisonItem::getPrice).reversed();
+            case LATEST -> Comparator.comparing(SkuComparisonItem::getCapturedAt).reversed();
         };
     }
 
-    private void validateComparisonInput(List<Long> skuIds) {
-        if (skuIds == null || skuIds.isEmpty()) {
-            log.warn("SKU IDs list is null or empty");
-            throw new IllegalArgumentException("SKU IDs list cannot be null or empty");
+    private List<SkuComparisonItem> applyPagination(List<SkuComparisonItem> items, Integer page, Integer size) {
+        // Defensive checks
+        if (page == null || page < 0 || size == null || size <= 0) {
+            log.debug("Invalid pagination params: page={}, size={}, returning empty list", page, size);
+            return new ArrayList<>();
         }
 
-        if (skuIds.size() < 2) {
-            log.warn("Insufficient SKU IDs provided for comparison: {}", skuIds.size());
-            throw new IllegalArgumentException("At least 2 SKU IDs are required for comparison");
+        if (size >= items.size()) {
+            return new ArrayList<>(items);
         }
+
+        int startIndex = page * size;
+        if (startIndex >= items.size()) {
+            log.debug("Page {} exceeds available items, returning empty list", page);
+            return new ArrayList<>();
+        }
+
+        int endIndex = Math.min(startIndex + size, items.size());
+        log.debug("Applying pagination: page={}, size={}, returning items [{} to {}]", page, size, startIndex, endIndex - 1);
+
+        // Return detached list to avoid view-backed list issues
+        return new ArrayList<>(items.subList(startIndex, endIndex));
     }
 
     private List<SkuComparisonItem> collectValidComparisonItems(List<Long> skuIds) {
-        log.debug("Fetching latest snapshots for {} SKU IDs", skuIds.size());
+        log.debug("Batch fetching latest snapshots for {} SKU IDs", skuIds.size());
 
-        List<SkuComparisonItem> validItems = new ArrayList<>();
-
+        // Validate each SKU ID first
+        List<Long> validSkuIds = new ArrayList<>();
         for (Long skuId : skuIds) {
-            // Validate each SKU ID
             try {
                 validator.validateSkuId(skuId);
+                validSkuIds.add(skuId);
             } catch (IllegalArgumentException e) {
                 log.debug("Skipping invalid SKU ID: {}", skuId);
-                continue;
             }
-
-            // Fetch latest snapshot
-            Optional<PriceSnapshot> snapshotOpt = priceSnapshotService.getLatestSnapshot(skuId);
-
-            if (snapshotOpt.isEmpty()) {
-                log.debug("No snapshot found for skuId={}, skipping", skuId);
-                continue;
-            }
-
-            PriceSnapshot snapshot = snapshotOpt.get();
-            BigDecimal sellingPrice = snapshot.getSellingPrice();
-
-            // Skip if selling price is null
-            if (sellingPrice == null) {
-                log.debug("Null selling price for skuId={}, skipping", skuId);
-                continue;
-            }
-
-            // Add valid item
-            SkuComparisonItem item = SkuComparisonItem.builder()
-                    .skuId(skuId)
-                    .price(sellingPrice)
-                    .availability(snapshot.getAvailability())
-                    .capturedAt(snapshot.getCapturedAt())
-                    .build();
-
-            validItems.add(item);
-            log.debug("Added skuId={} with price={} to comparison", skuId, sellingPrice);
         }
 
-        // Verify we have at least 2 valid SKUs
-        if (validItems.size() < 2) {
-            log.warn("Insufficient valid SKU snapshots for comparison. Required: 2, Found: {}", validItems.size());
-            throw new IllegalArgumentException(
-                    String.format("At least 2 valid SKU snapshots required for comparison. Found: %d", validItems.size())
-            );
+        if (validSkuIds.isEmpty()) {
+            log.warn("No valid SKU IDs after validation");
+            throw new IllegalArgumentException("No valid SKU IDs provided");
         }
 
-        return validItems;
+        // Batch fetch all latest snapshots in ONE query (eliminates N+1)
+        List<PriceSnapshot> snapshots = priceSnapshotService.getLatestSnapshotsForSkuIds(validSkuIds);
+        log.debug("Fetched {} snapshots out of {} valid SKU IDs", snapshots.size(), validSkuIds.size());
+
+        // Convert to comparison items
+        return convertSnapshotsToComparisonItems(snapshots);
     }
 
     private ComparisonMetrics calculateComparisonMetrics(List<SkuComparisonItem> validItems) {

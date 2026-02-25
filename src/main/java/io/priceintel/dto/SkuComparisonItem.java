@@ -10,8 +10,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 @Getter
-@Setter
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class SkuComparisonItem {

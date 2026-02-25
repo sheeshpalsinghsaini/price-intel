@@ -91,6 +91,20 @@ public class PriceSnapshotService {
         );
     }
 
+    public List<PriceSnapshot> getLatestSnapshotsForSkuIds(List<Long> skuIds) {
+        log.debug("Fetching latest snapshots for {} SKU IDs", skuIds != null ? skuIds.size() : 0);
+
+        if (skuIds == null || skuIds.isEmpty()) {
+            log.warn("SKU IDs list is null or empty");
+            throw new IllegalArgumentException("SKU IDs list cannot be null or empty");
+        }
+
+        List<PriceSnapshot> snapshots = priceSnapshotRepository.findLatestSnapshotsForSkuIds(skuIds);
+        log.debug("Fetched {} latest snapshots for {} SKU IDs", snapshots.size(), skuIds.size());
+
+        return snapshots;
+    }
+
     private void validateInputs(
             Long skuLocationId,
             BigDecimal sellingPrice,

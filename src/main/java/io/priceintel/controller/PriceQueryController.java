@@ -3,6 +3,7 @@ package io.priceintel.controller;
 import io.priceintel.dto.response.LatestPriceResponse;
 import io.priceintel.dto.response.PriceHistoryResponse;
 import io.priceintel.dto.response.SkuComparisonResponse;
+import io.priceintel.enums.ComparisonSortType;
 import io.priceintel.service.PriceQueryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -106,10 +107,10 @@ public class PriceQueryController {
             @RequestParam(required = false, defaultValue = "false") Boolean inStockOnly,
 
             @Parameter(
-                    description = "Sort order for results. Options: 'price' (ascending), 'price_desc' (descending), 'latest' (by capture time, newest first)",
-                    example = "price"
+                    description = "Sort order for results. Options: PRICE_ASC, PRICE_DESC, LATEST",
+                    example = "PRICE_ASC"
             )
-            @RequestParam(required = false, defaultValue = "price") String sortBy
+            @RequestParam(required = false, defaultValue = "PRICE_ASC") ComparisonSortType sortType
     ) {
         // Parse comma-separated SKU IDs with safety
         List<Long> skuIdList;
@@ -123,11 +124,7 @@ public class PriceQueryController {
             throw new IllegalArgumentException("Invalid SKU ID format in skuIds parameter");
         }
 
-        // Validate minimum count
-        if (skuIdList.size() < 2) {
-            throw new IllegalArgumentException("At least 2 SKU IDs required");
-        }
 
-        return ResponseEntity.ok(priceQueryService.compareSkus(skuIdList, inStockOnly, sortBy));
+        return ResponseEntity.ok(priceQueryService.compareSkus(skuIdList, inStockOnly, sortType));
     }
 }
